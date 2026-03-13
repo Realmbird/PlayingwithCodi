@@ -3,7 +3,7 @@
 Based on
 * Original paper [CODI: Compressing Chain-of-Thought into Continuous Space via Self-Distillation](https://arxiv.org/abs/2502.21074)
 
-Used added addtional experiments for 
+Used added additional experiments for 
 https://www.lesswrong.com/editPost?postId=tLWrk9H2pmx2rJ7hC&key=369426330689dd659ac783dbba3196
 
 ## Setup
