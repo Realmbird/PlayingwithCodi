@@ -519,7 +519,11 @@ translators_codi = load_translators("/home/chriskino/codi/tuned_lens/default_cod
 translators_even = load_translators("/home/chriskino/codi/tuned_lens/custom_codi_GSM8K/default_codi_6_GSM8K_even.pt", model)
 translators_odd = load_translators("/home/chriskino/codi/tuned_lens/custom_codi_GSM8K/default_codi_6_GSM8K_odd.pt", model)
 translators_3_5 = load_translators("/home/chriskino/codi/tuned_lens/custom_codi_GSM8K/default_codi_6_GSM8K_(3,5).pt", model)
-
+translators_1 = load_translators("/home/chriskino/codi/tuned_lens/custom_codi_GSM8K/default_codi_6_GSM8K_(1).pt", model)
+translators_1_3 = load_translators("/home/chriskino/codi/tuned_lens/custom_codi_GSM8K/default_codi_6_GSM8K_(1,3).pt", model)
+translators_1_5 = load_translators("/home/chriskino/codi/tuned_lens/custom_codi_GSM8K/default_codi_6_GSM8K_(1,5).pt", model)
+translators_3 = load_translators("/home/chriskino/codi/tuned_lens/custom_codi_GSM8K/default_codi_6_GSM8K_(3).pt", model)
+translators_5 = load_translators("/home/chriskino/codi/tuned_lens/custom_codi_GSM8K/default_codi_6_GSM8K_(5).pt", model)
 
 # %%
 import re
@@ -566,6 +570,11 @@ translator_configs = {
     "Even steps lens": translators_even,
     "Odd steps lens": translators_odd,
     "Steps 3+5 lens": translators_3_5,
+    "Steps 1": translators_1,
+    "Steps 1+3": translators_1_3,
+    "Steps 1+5": translators_1_5,
+    "Step 3": translators_3,
+    "Step 5": translators_5
 }
 
 all_topk_results = {}
@@ -662,7 +671,7 @@ print("Done")
 # %% 
 def plot_final_detection_per_latent_scaled(all_topk_results, top_k=10):
     n_lenses = len(all_topk_results)
-    fig, axes = plt.subplots(2, 3, figsize=(22, 12), sharex=True, sharey=False)
+    fig, axes = plt.subplots(3, 3, figsize=(22, 12), sharex=True, sharey=False)
     axes = axes.flatten()
 
     labels = ["Prompt"] + [f"Latent {i+1}" for i in range(6)]
@@ -704,4 +713,214 @@ os.makedirs("results/detection", exist_ok=True)
 fig = plot_final_detection_per_latent_scaled(all_topk_results, top_k=10)
 fig.savefig("results/detection/scaled_final_detection_per_latent.png", dpi=200, bbox_inches="tight")
 plt.close(fig)
+# %%
+def plot_detection_across_positions_by_topk(all_topk_results, answer_type="final", 
+                                              topk_to_show=None, save_dir=None):
+    if topk_to_show is None:
+        topk_to_show = [1, 3, 5, 10]
+    
+    top_k_values = sorted(topk_to_show)
+    colors = plt.cm.viridis(np.linspace(0, 0.9, len(top_k_values)))
+    labels = ["Prompt"] + [f"Latent {i+1}" for i in range(6)]
+    
+    figs = {}
+    for name, results in all_topk_results.items():
+        fig, ax = plt.subplots(figsize=(8, 5))
+        num_positions = results[top_k_values[0]][f"{answer_type}_rate"].shape[0]
+        
+        for k, color in zip(top_k_values, colors):
+            rate = results[k][f"{answer_type}_rate"]
+            avg_per_position = rate[:, -3:].mean(axis=1)
+            ax.plot(range(num_positions), avg_per_position,
+                    label=f"top-{k}", color=color,
+                    linewidth=2, marker="o", markersize=5)
+        
+        ax.set_title(name, fontsize=13, fontweight="bold")
+        ax.set_xlabel("Latent position", fontsize=11)
+        ax.set_ylabel(f"{answer_type.capitalize()} detection rate", fontsize=11)
+        ax.set_xticks(range(num_positions))
+        ax.set_xticklabels(labels, rotation=45, fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ymax = max(
+            results[k][f"{answer_type}_rate"][:, -3:].mean(axis=1).max()
+            for k in top_k_values
+        )
+        ax.set_ylim(0, max(ymax * 1.15, 0.05))
+        ax.legend(fontsize=10)
+        plt.tight_layout()
+        
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+            safe_name = name.replace(" ", "_").replace("+", "plus")
+            fig.savefig(f"{save_dir}/{answer_type}_{safe_name}.png", 
+                       dpi=150, bbox_inches="tight")
+            plt.close(fig)
+        
+        figs[name] = fig
+    
+    return figs
+
+# %%
+figs = plot_detection_across_positions_by_topk(
+    all_topk_results, 
+    answer_type="final",
+    save_dir="results/detection/per_lens"
+)
+# %%
+# %%
+# === THEREFORE TOKEN DETECTION ===
+
+# Get therefore token ids
+therefore_ids = set()
+for variant in ["therefore", "Therefore", " therefore", " Therefore", "\ntherefore", "\nTherefore"]:
+    ids = tokenizer.encode(variant, add_special_tokens=False)
+    if len(ids) == 1:
+        therefore_ids.update(ids)
+print(f"Therefore token ids: {therefore_ids}")
+
+def compute_topk_therefore_rates(model, tokenizer, prompts_with_answers,
+                                  therefore_ids, num_latent_iterations=6,
+                                  top_k_values=None, translators=None):
+    """Same as compute_topk_detection_rates but only tracks 'therefore' token."""
+    if top_k_values is None:
+        top_k_values = [1, 3, 5, 10]
+
+    device = next(model.parameters()).device
+    lm_head = get_lm_head(model)
+    layer_norm = get_layer_norm(model)
+    sot_token = tokenizer.convert_tokens_to_ids("<|bocot|>")
+    num_layers = model.codi.config.num_hidden_layers + 1
+    num_positions = num_latent_iterations + 1
+    total = len(prompts_with_answers)
+
+    counts = {k: np.zeros((num_positions, num_layers)) for k in top_k_values}
+
+    for item in prompts_with_answers:
+        inputs = tokenizer(item["prompt"], return_tensors="pt", padding=True)
+        input_ids = inputs["input_ids"].to(device)
+        attention_mask = inputs["attention_mask"].to(device)
+
+        bot_tensor = torch.tensor(
+            [tokenizer.eos_token_id, sot_token], dtype=torch.long, device=device
+        ).unsqueeze(0)
+        input_ids_bot = torch.cat((input_ids, bot_tensor), dim=1)
+        attention_mask_bot = torch.cat(
+            (attention_mask, torch.ones_like(bot_tensor)), dim=1
+        )
+
+        with torch.no_grad():
+            outputs = model.codi(
+                input_ids=input_ids_bot,
+                use_cache=True,
+                output_hidden_states=True,
+                attention_mask=attention_mask_bot,
+            )
+            past_key_values = outputs.past_key_values
+            all_position_hidden_states = [outputs.hidden_states]
+
+            latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
+            if model.use_prj:
+                latent_embd = model.prj(latent_embd).to(dtype=model.codi.dtype)
+
+            for i in range(num_latent_iterations):
+                outputs = model.codi(
+                    inputs_embeds=latent_embd,
+                    use_cache=True,
+                    output_hidden_states=True,
+                    past_key_values=past_key_values,
+                )
+                past_key_values = outputs.past_key_values
+                all_position_hidden_states.append(outputs.hidden_states)
+
+                latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
+                if model.use_prj:
+                    latent_embd = model.prj(latent_embd).to(dtype=model.codi.dtype)
+
+        max_k = max(top_k_values)
+        for pos_idx, hidden_states in enumerate(all_position_hidden_states):
+            for layer_idx, h in enumerate(hidden_states):
+                h_last = h[:, -1, :]
+                if translators is not None and layer_idx < len(translators):
+                    h_last = translators[layer_idx](h_last)
+                if layer_norm is not None:
+                    h_last = layer_norm(h_last)
+                logits = lm_head(h_last)
+                _, top_indices = torch.topk(logits, max_k, dim=-1)
+                top_ids_list = top_indices[0].cpu().tolist()
+
+                for k in top_k_values:
+                    if set(top_ids_list[:k]) & therefore_ids:
+                        counts[k][pos_idx, layer_idx] += 1
+
+    return {k: {"therefore_rate": counts[k] / total,
+                "num_layers": num_layers,
+                "num_positions": num_positions}
+            for k in top_k_values}
+
+# %%
+all_therefore_results = {}
+for name, translators in translator_configs.items():
+    print(f"Running therefore detection: {name}...")
+    all_therefore_results[name] = compute_topk_therefore_rates(
+        model, tokenizer, prompts_with_answers,
+        therefore_ids=therefore_ids,
+        num_latent_iterations=6,
+        top_k_values=top_k_values,
+        translators=translators,
+    )
+
+# %%
+# Reuse plot_detection_across_positions_by_topk but for therefore
+# Need a small wrapper since the key is "therefore_rate" not "final_rate"
+def plot_therefore_across_positions_by_topk(all_therefore_results,
+                                             topk_to_show=None, save_dir=None):
+    if topk_to_show is None:
+        topk_to_show = [1, 3, 5, 10]
+
+    top_k_values = sorted(topk_to_show)
+    colors = plt.cm.viridis(np.linspace(0, 0.9, len(top_k_values)))
+    labels = ["Prompt"] + [f"Latent {i+1}" for i in range(6)]
+
+    figs = {}
+    for name, results in all_therefore_results.items():
+        fig, ax = plt.subplots(figsize=(8, 5))
+        num_positions = results[top_k_values[0]]["therefore_rate"].shape[0]
+
+        for k, color in zip(top_k_values, colors):
+            rate = results[k]["therefore_rate"]
+            avg_per_position = rate[:, -3:].mean(axis=1)
+            ax.plot(range(num_positions), avg_per_position,
+                    label=f"top-{k}", color=color,
+                    linewidth=2, marker="o", markersize=5)
+
+        ax.set_title(f"{name}\n'Therefore' token detection", fontsize=13, fontweight="bold")
+        ax.set_xlabel("Latent position", fontsize=11)
+        ax.set_ylabel("'Therefore' detection rate", fontsize=11)
+        ax.set_xticks(range(num_positions))
+        ax.set_xticklabels(labels, rotation=45, fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ymax = max(
+            results[k]["therefore_rate"][:, -3:].mean(axis=1).max()
+            for k in top_k_values
+        )
+        ax.set_ylim(0, max(ymax * 1.15, 0.05))
+        ax.legend(fontsize=10)
+        plt.tight_layout()
+
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+            safe_name = name.replace(" ", "_").replace("+", "plus")
+            fig.savefig(f"{save_dir}/therefore_{safe_name}.png",
+                       dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+        figs[name] = fig
+    return figs
+
+# %%
+figs_therefore = plot_therefore_across_positions_by_topk(
+    all_therefore_results,
+    save_dir="results/detection/therefore"
+)
+
 # %%

@@ -21,7 +21,7 @@ MODEL_NAME_OR_PATH = "meta-llama/Llama-3.2-1B-Instruct"
 DEVICE = "cuda"
 DTYPE = "bfloat16"
 
-PROMPT = "A team starts with 3 members. They recruit 5 new members. Then each current member recruits 2 additional people. How many people are there now on the team? Give the answer only and nothing else."
+PROMPT = "Out of 600 employees in a company, 30% got promoted while 10% received bonus. How many employees did not get either a promotion or a bonus?"
 PROMPT = "Name a mammal that can fly"
 NUM_LATENT_ITERATIONS = 10
 TOP_K_TOKENS = 10  # Number of top tokens to display per layer
@@ -380,7 +380,7 @@ results = run_inference_with_tuned_logit_lens(
     prompt=PROMPT,
     num_latent_iterations=NUM_LATENT_ITERATIONS,
     top_k=TOP_K_TOKENS,
-    translators_path="/home/chriskino/codi/tuned_lens/default_direct/default_tuned_6_GSM8K.pt"
+    translators_path="/home/chriskino/codi/tuned_lens/default_codi/default_codi_6_GSM8K.pt."
 )
 # %%
 # Print detailed table
@@ -389,9 +389,9 @@ print_logit_lens_table(results, tokenizer, top_k=TOP_K_TOKENS)
 # Visualize
 fig = visualize_logit_lens(results, tokenizer)
 if fig is not None:
-    results_dir = "results/custom_tuned_logit_lens_GSM8K"
+    results_dir = "results/default_codi_GSM8K_3_not_10_answer_720"
     os.makedirs(results_dir, exist_ok=True)
-    output_path = os.path.join(results_dir, "logit_lens_latents_10_(1,5).png")
+    output_path = os.path.join(results_dir, "720_logit_lens_latents_10_default_codi.png")
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     print(f"\nSaved visualization to: {output_path}")
     plt.show()
@@ -400,4 +400,98 @@ if fig is not None:
 # %%
 results
 
+# %%
+PROMPT = "Out of 600 employees in a company, 30% got promoted while 10% received bonus. How many employees did not get either a promotion or a bonus?"
+device = next(model.parameters()).device
+
+# Get model components
+lm_head = get_lm_head(model)
+layer_norm = get_layer_norm(model)
+
+# Load translators if path provided
+translators = None
+# if translators_path is not None:
+#     translators = load_translators(translators_path, model)
+
+# Tokenize
+inputs = tokenizer(PROMPT, return_tensors="pt", padding=True)
+input_ids = inputs["input_ids"].to(device)
+attention_mask = inputs["attention_mask"].to(device)
+
+# Special tokens
+sot_token = tokenizer.convert_tokens_to_ids("<|bocot|>")
+
+# Add BOT tokens
+bot_tensor = torch.tensor(
+    [tokenizer.eos_token_id, sot_token], dtype=torch.long, device=device
+).unsqueeze(0)
+
+input_ids_bot = torch.cat((input_ids, bot_tensor), dim=1)
+attention_mask_bot = torch.cat((attention_mask, torch.ones_like(bot_tensor)), dim=1)
+# Set the parameters for 6 'silent' thoughts
+num_latent_iterations = 6 
+
+output = model.generate(
+    input_ids=input_ids,
+    attention_mask=attention_mask,
+    tokenizer=tokenizer,
+    max_new_tokens=256,           # Just enough to get the number
+    num_latent_iterations=num_latent_iterations,
+    verbalize_cot=True,         # This keeps the 'thought' tokens hidden
+    sot_token=tokenizer.convert_tokens_to_ids("<|bocot|>"),
+    eot_token=tokenizer.convert_tokens_to_ids("<|eocot|>"),
+    greedy=True
+)
+
+# Decode the result
+full_text = tokenizer.decode(output["sequences"][0], skip_special_tokens=True)
+
+print(f"\n--- FULL MODEL OUTPUT ({num_latent_iterations} LATENTS) ---")
+print(full_text)
+# %%
+PROMPT = "Name a mammal"
+# Get model components
+lm_head = get_lm_head(model)
+layer_norm = get_layer_norm(model)
+
+# Load translators if path provided
+translators = None
+# if translators_path is not None:
+#     translators = load_translators(translators_path, model)
+
+# Tokenize
+inputs = tokenizer(PROMPT, return_tensors="pt", padding=True)
+input_ids = inputs["input_ids"].to(device)
+attention_mask = inputs["attention_mask"].to(device)
+
+# Special tokens
+sot_token = tokenizer.convert_tokens_to_ids("<|bocot|>")
+
+# Add BOT tokens
+bot_tensor = torch.tensor(
+    [tokenizer.eos_token_id, sot_token], dtype=torch.long, device=device
+).unsqueeze(0)
+
+input_ids_bot = torch.cat((input_ids, bot_tensor), dim=1)
+attention_mask_bot = torch.cat((attention_mask, torch.ones_like(bot_tensor)), dim=1)
+# Set the parameters for 6 'silent' thoughts
+num_latent_iterations = 6 
+
+output = model.generate(
+    input_ids=input_ids,
+    attention_mask=attention_mask,
+    tokenizer=tokenizer,
+    max_new_tokens=256,           # Just enough to get the number
+    num_latent_iterations=num_latent_iterations,
+    verbalize_cot=False,         # This keeps the 'thought' tokens hidden
+    sot_token=tokenizer.convert_tokens_to_ids("<|bocot|>"),
+    eot_token=tokenizer.convert_tokens_to_ids("<|eocot|>"),
+    greedy=True
+)
+
+# Decode the result
+full_text = tokenizer.decode(output["sequences"][0], skip_special_tokens=True)
+
+print(f"\n--- FULL MODEL OUTPUT ({num_latent_iterations} LATENTS) ---")
+print(full_text)
 # %%
